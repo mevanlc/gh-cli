@@ -37,6 +37,7 @@ func TestNewCmdWatch(t *testing.T) {
 			wants: WatchOptions{
 				Prompt:   true,
 				Interval: defaultInterval,
+				Columns:  1,
 			},
 		},
 		{
@@ -46,6 +47,7 @@ func TestNewCmdWatch(t *testing.T) {
 			wants: WatchOptions{
 				Interval: 10,
 				Prompt:   true,
+				Columns:  1,
 			},
 		},
 		{
@@ -55,6 +57,7 @@ func TestNewCmdWatch(t *testing.T) {
 				Interval:   defaultInterval,
 				RunID:      "1234",
 				ExitStatus: true,
+				Columns:    1,
 			},
 		},
 		{
@@ -64,7 +67,41 @@ func TestNewCmdWatch(t *testing.T) {
 				Interval: defaultInterval,
 				RunID:    "1234",
 				Compact:  true,
+				Columns:  1,
 			},
+		},
+		{
+			name: "column count",
+			cli:  "1234 --columns 3",
+			wants: WatchOptions{
+				Interval: defaultInterval,
+				RunID:    "1234",
+				Columns:  3,
+			},
+		},
+		{
+			name: "automatic column count",
+			cli:  "1234 --columns auto",
+			wants: WatchOptions{
+				Interval: defaultInterval,
+				RunID:    "1234",
+				Columns:  shared.AutoColumnCount,
+			},
+		},
+		{
+			name:     "zero columns",
+			cli:      "1234 --columns 0",
+			wantsErr: true,
+		},
+		{
+			name:     "negative columns",
+			cli:      "1234 --columns -2",
+			wantsErr: true,
+		},
+		{
+			name:     "columns is not a number",
+			cli:      "1234 --columns two",
+			wantsErr: true,
 		},
 	}
 
@@ -103,6 +140,8 @@ func TestNewCmdWatch(t *testing.T) {
 			assert.Equal(t, tt.wants.Prompt, gotOpts.Prompt)
 			assert.Equal(t, tt.wants.ExitStatus, gotOpts.ExitStatus)
 			assert.Equal(t, tt.wants.Interval, gotOpts.Interval)
+			assert.Equal(t, tt.wants.Compact, gotOpts.Compact)
+			assert.Equal(t, tt.wants.Columns, gotOpts.Columns)
 		})
 	}
 }
@@ -202,6 +241,37 @@ func TestWatchRun(t *testing.T) {
 			httpmock.JSONResponse(shared.TestWorkflow))
 	}
 
+	twoJobRunStubs := func(reg *httpmock.Registry) {
+		inProgressRun := shared.TestRunWithCommit(2, shared.InProgress, "", "commit2")
+		completedRun := shared.TestRun(2, shared.Completed, shared.Success)
+		reg.Register(
+			httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/2"),
+			httpmock.JSONResponse(inProgressRun))
+		reg.Register(
+			httpmock.REST("GET", "runs/2/jobs"),
+			httpmock.JSONResponse(shared.JobsPayload{
+				Jobs: []shared.Job{
+					shared.SuccessfulJob,
+					shared.FailedJob,
+				},
+			}))
+		reg.Register(
+			httpmock.REST("GET", "repos/OWNER/REPO/check-runs/10/annotations"),
+			httpmock.JSONResponse([]shared.Annotation{}))
+		reg.Register(
+			httpmock.REST("GET", "repos/OWNER/REPO/check-runs/20/annotations"),
+			httpmock.JSONResponse([]shared.Annotation{}))
+		reg.Register(
+			httpmock.REST("GET", "repos/OWNER/REPO/actions/runs/2"),
+			httpmock.JSONResponse(completedRun))
+		reg.Register(
+			httpmock.REST("GET", "repos/OWNER/REPO/actions/workflows/123"),
+			httpmock.JSONResponse(shared.TestWorkflow))
+		reg.Register(
+			httpmock.REST("GET", "repos/OWNER/REPO/actions/workflows/123"),
+			httpmock.JSONResponse(shared.TestWorkflow))
+	}
+
 	tests := []struct {
 		name        string
 		httpStubs   func(*httpmock.Registry)
@@ -212,6 +282,22 @@ func TestWatchRun(t *testing.T) {
 		errMsg      string
 		wantOut     string
 	}{
+		{
+			name:      "jobs laid out in two columns",
+			tty:       true,
+			opts:      &WatchOptions{RunID: "2", Columns: 2},
+			httpStubs: twoJobRunStubs,
+			wantOut:   "\x1b[?1049h\x1b[?1049l✓ trunk CI · 2\nTriggered via push about 59 minutes ago\n\nJOBS\n✓ cool job in 4m34s (ID 10)              X sad job in 4m34s (ID 20)\n  ✓ fob the barz                           ✓ barf the quux\n  ✓ barz the fob                           X quux the barf\n\n✓ Run CI (2) completed with 'success'\n",
+		},
+		{
+			// The fake terminal in tests is 80 wide, which is too narrow to give
+			// two columns a usable width, so auto stays single column.
+			name:      "auto column count falls back to one column on a narrow terminal",
+			tty:       true,
+			opts:      &WatchOptions{RunID: "2", Columns: shared.AutoColumnCount},
+			httpStubs: twoJobRunStubs,
+			wantOut:   "\x1b[?1049h\x1b[?1049l✓ trunk CI · 2\nTriggered via push about 59 minutes ago\n\nJOBS\n✓ cool job in 4m34s (ID 10)\n  ✓ fob the barz\n  ✓ barz the fob\nX sad job in 4m34s (ID 20)\n  ✓ barf the quux\n  X quux the barf\n\n✓ Run CI (2) completed with 'success'\n",
+		},
 		{
 			name: "run ID provided run already completed",
 			opts: &WatchOptions{

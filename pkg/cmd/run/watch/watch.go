@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
@@ -31,6 +32,11 @@ type WatchOptions struct {
 	ExitStatus bool
 	Compact    bool
 
+	// Columns is the number of columns to lay the job list out in.
+	// shared.AutoColumnCount means "fit the terminal width"; anything less than
+	// 2 means the traditional single-column layout.
+	Columns int
+
 	Prompt bool
 
 	Now func() time.Time
@@ -44,6 +50,9 @@ func NewCmdWatch(f *cmdutil.Factory, runF func(*WatchOptions) error) *cobra.Comm
 		Now:        time.Now,
 	}
 
+	// Held as a string so that both a count and "auto" can be accepted.
+	var columns string
+
 	cmd := &cobra.Command{
 		Use:   "watch <run-id>",
 		Short: "Watch a run until it completes, showing its progress",
@@ -52,6 +61,11 @@ func NewCmdWatch(f *cmdutil.Factory, runF func(*WatchOptions) error) *cobra.Comm
 
 			By default, all steps are displayed. The %[1]s--compact%[1]s option can be used to only
 			show the relevant/failed steps.
+
+			Runs with many jobs can outgrow the height of the terminal. The %[1]s--columns%[1]s option
+			lays the job list out side by side to use the full width instead, taking either a
+			column count or %[1]sauto%[1]s to fit as many columns as the terminal is wide enough for.
+			Job names and steps too wide for their column are truncated.
 
 			This command does not support authenticating via fine grained PATs
 			as it is not currently possible to create a PAT with the %[1]schecks:read%[1]s permission.
@@ -63,12 +77,24 @@ func NewCmdWatch(f *cmdutil.Factory, runF func(*WatchOptions) error) *cobra.Comm
 			# Watch a run in compact mode
 			$ gh run watch --compact
 
+			# Spread the job list over two columns
+			$ gh run watch --columns 2
+
+			# Use as many columns as the terminal is wide enough for
+			$ gh run watch --columns auto
+
 			# Run some other command when the run is finished
 			$ gh run watch && notify-send 'run is done!'
 		`),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// support `-R, --repo` override
 			opts.BaseRepo = f.BaseRepo
+
+			parsedColumns, err := parseColumns(columns)
+			if err != nil {
+				return err
+			}
+			opts.Columns = parsedColumns
 
 			if len(args) > 0 {
 				opts.RunID = args[0]
@@ -88,8 +114,22 @@ func NewCmdWatch(f *cmdutil.Factory, runF func(*WatchOptions) error) *cobra.Comm
 	cmd.Flags().BoolVar(&opts.ExitStatus, "exit-status", false, "Exit with non-zero status if run fails")
 	cmd.Flags().BoolVar(&opts.Compact, "compact", false, "Show only relevant/failed steps")
 	cmd.Flags().IntVarP(&opts.Interval, "interval", "i", defaultInterval, "Refresh interval in seconds")
+	cmd.Flags().StringVar(&columns, "columns", "1", `Number of columns to lay the job list out in, or "auto" to fit the terminal width`)
 
 	return cmd
+}
+
+func parseColumns(value string) (int, error) {
+	if value == "auto" {
+		return shared.AutoColumnCount, nil
+	}
+
+	columns, err := strconv.Atoi(value)
+	if err != nil || columns < 1 {
+		return 0, cmdutil.FlagErrorf("invalid value for --columns: %q: must be a positive number or \"auto\"", value)
+	}
+
+	return columns, nil
 }
 
 func watchRun(opts *WatchOptions) error {
@@ -261,12 +301,21 @@ func renderRun(out io.Writer, opts WatchOptions, client *api.Client, repo ghrepo
 		return run, nil
 	}
 
-	fmt.Fprintln(out, cs.Bold("JOBS"))
+	var blocks [][]string
 	if opts.Compact {
-		fmt.Fprintln(out, shared.RenderJobsCompact(cs, jobs))
+		blocks = shared.CompactJobBlocks(cs, jobs)
 	} else {
-		fmt.Fprintln(out, shared.RenderJobs(cs, jobs, true))
+		blocks = shared.JobBlocks(cs, jobs, true)
 	}
+
+	width := opts.IO.TerminalWidth()
+	columns := opts.Columns
+	if columns == shared.AutoColumnCount {
+		columns = shared.AutoColumns(width)
+	}
+
+	fmt.Fprintln(out, cs.Bold("JOBS"))
+	fmt.Fprintln(out, shared.RenderColumns(blocks, width, columns))
 
 	if missingAnnotationsPermissions {
 		fmt.Fprintln(out)

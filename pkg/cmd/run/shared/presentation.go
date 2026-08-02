@@ -26,40 +26,41 @@ func RenderRunHeader(cs *iostreams.ColorScheme, run Run, ago, prNumber string, a
 }
 
 func RenderJobs(cs *iostreams.ColorScheme, jobs []Job, verbose bool) string {
-	lines := []string{}
-	for _, job := range jobs {
-		elapsed := job.CompletedAt.Sub(job.StartedAt)
-		elapsedStr := fmt.Sprintf(" in %s", elapsed)
-		if elapsed < 0 {
-			elapsedStr = ""
-		}
-		symbol, symbolColor := Symbol(cs, job.Status, job.Conclusion)
-		id := cs.Cyanf("%d", job.ID)
-		lines = append(lines, fmt.Sprintf("%s %s%s (ID %s)", symbolColor(symbol), cs.Bold(job.Name), elapsedStr, id))
-		if verbose || IsFailureState(job.Conclusion) {
-			for _, step := range job.Steps {
-				stepSymbol, stepSymColor := Symbol(cs, step.Status, step.Conclusion)
-				lines = append(lines, fmt.Sprintf("  %s %s", stepSymColor(stepSymbol), step.Name))
-			}
-		}
-	}
-
-	return strings.Join(lines, "\n")
+	return joinBlocks(JobBlocks(cs, jobs, verbose))
 }
 
 func RenderJobsCompact(cs *iostreams.ColorScheme, jobs []Job) string {
-	lines := []string{}
+	return joinBlocks(CompactJobBlocks(cs, jobs))
+}
+
+// JobBlocks renders the same content as RenderJobs, but keeps each job in its
+// own block of lines rather than flattening everything into one string. Column
+// layouts need the boundaries so that a job's steps are never split away from
+// the job they belong to. See RenderColumns.
+func JobBlocks(cs *iostreams.ColorScheme, jobs []Job, verbose bool) [][]string {
+	blocks := make([][]string, 0, len(jobs))
 	for _, job := range jobs {
-		elapsed := job.CompletedAt.Sub(job.StartedAt)
-		elapsedStr := fmt.Sprintf(" in %s", elapsed)
-		if elapsed < 0 {
-			elapsedStr = ""
+		block := []string{jobLine(cs, job)}
+		if verbose || IsFailureState(job.Conclusion) {
+			for _, step := range job.Steps {
+				block = append(block, stepLine(cs, step))
+			}
 		}
-		symbol, symbolColor := Symbol(cs, job.Status, job.Conclusion)
-		id := cs.Cyanf("%d", job.ID)
-		lines = append(lines, fmt.Sprintf("%s %s%s (ID %s)", symbolColor(symbol), cs.Bold(job.Name), elapsedStr, id))
+		blocks = append(blocks, block)
+	}
+
+	return blocks
+}
+
+// CompactJobBlocks is the CompactJobs equivalent of JobBlocks, showing only the
+// failed and in-progress steps of each job.
+func CompactJobBlocks(cs *iostreams.ColorScheme, jobs []Job) [][]string {
+	blocks := make([][]string, 0, len(jobs))
+	for _, job := range jobs {
+		block := []string{jobLine(cs, job)}
 
 		if job.Status == Completed && job.Conclusion == Success {
+			blocks = append(blocks, block)
 			continue
 		}
 
@@ -67,23 +68,51 @@ func RenderJobsCompact(cs *iostreams.ColorScheme, jobs []Job) string {
 		var failedStepLines []string
 
 		for _, step := range job.Steps {
-			stepSymbol, stepSymColor := Symbol(cs, step.Status, step.Conclusion)
-			stepLine := fmt.Sprintf("  %s %s", stepSymColor(stepSymbol), step.Name)
+			line := stepLine(cs, step)
 
 			if IsFailureState(step.Conclusion) {
-				failedStepLines = append(failedStepLines, stepLine)
+				failedStepLines = append(failedStepLines, line)
 			}
 
 			if step.Status == InProgress {
-				inProgressStepLine = stepLine
+				inProgressStepLine = line
 			}
 		}
 
-		lines = append(lines, failedStepLines...)
+		block = append(block, failedStepLines...)
 
 		if inProgressStepLine != "" {
-			lines = append(lines, inProgressStepLine)
+			block = append(block, inProgressStepLine)
 		}
+
+		blocks = append(blocks, block)
+	}
+
+	return blocks
+}
+
+func jobLine(cs *iostreams.ColorScheme, job Job) string {
+	elapsed := job.CompletedAt.Sub(job.StartedAt)
+	elapsedStr := fmt.Sprintf(" in %s", elapsed)
+	if elapsed < 0 {
+		elapsedStr = ""
+	}
+	symbol, symbolColor := Symbol(cs, job.Status, job.Conclusion)
+	id := cs.Cyanf("%d", job.ID)
+
+	return fmt.Sprintf("%s %s%s (ID %s)", symbolColor(symbol), cs.Bold(job.Name), elapsedStr, id)
+}
+
+func stepLine(cs *iostreams.ColorScheme, step Step) string {
+	symbol, symbolColor := Symbol(cs, step.Status, step.Conclusion)
+
+	return fmt.Sprintf("  %s %s", symbolColor(symbol), step.Name)
+}
+
+func joinBlocks(blocks [][]string) string {
+	lines := []string{}
+	for _, block := range blocks {
+		lines = append(lines, block...)
 	}
 
 	return strings.Join(lines, "\n")
