@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
+	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/browser"
 	"github.com/cli/cli/v2/internal/tableprinter"
 	"github.com/cli/cli/v2/internal/text"
@@ -24,6 +25,46 @@ type ReposOptions struct {
 	Query    search.Query
 	Searcher search.Searcher
 	WebMode  bool
+}
+
+// NewCmdMyRepos creates a command that searches repositories owned by the authenticated user.
+func NewCmdMyRepos(f *cmdutil.Factory, runF func(*ReposOptions) error) *cobra.Command {
+	cmd := NewCmdRepos(f, runF)
+	cmd.Use = "my-repos [<query>]"
+	cmd.Short = "Search for repositories owned by the authenticated user"
+	cmd.Long = heredoc.Docf(`
+		Search for repositories owned by the authenticated user.
+
+		This command supports the same search syntax, flags, and output formats as
+		%[1]sgh search repos%[1]s.
+	`, "`")
+	cmd.Example = heredoc.Doc(`
+		# Search your repositories for names matching "cli"
+		$ gh search my-repos cli --match=name
+
+		# List your repositories that are not archived
+		$ gh search my-repos --archived=false
+	`)
+	cmd.PreRunE = func(cmd *cobra.Command, _ []string) error {
+		cfg, err := f.Config()
+		if err != nil {
+			return err
+		}
+		host, _ := cfg.Authentication().DefaultHost()
+
+		httpClient, err := f.HttpClient()
+		if err != nil {
+			return err
+		}
+		login, err := api.CurrentLoginName(api.NewClientFromHTTP(httpClient), host)
+		if err != nil {
+			return err
+		}
+
+		return cmd.Flags().Set("owner", login)
+	}
+
+	return cmd
 }
 
 func NewCmdRepos(f *cmdutil.Factory, runF func(*ReposOptions) error) *cobra.Command {

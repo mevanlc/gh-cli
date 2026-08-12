@@ -48,6 +48,7 @@ func NewCmdSearch(f *cmdutil.Factory) *cobra.Command {
 	cmd.AddCommand(searchCodeCmd.NewCmdCode(f, nil))
 	cmd.AddCommand(searchCommitsCmd.NewCmdCommits(f, nil))
 	cmd.AddCommand(searchIssuesCmd.NewCmdIssues(f, nil))
+	cmd.AddCommand(searchReposCmd.NewCmdMyRepos(f, nil))
 	cmd.AddCommand(searchPrsCmd.NewCmdPrs(f, nil))
 	cmd.AddCommand(searchReposCmd.NewCmdRepos(f, nil))
 

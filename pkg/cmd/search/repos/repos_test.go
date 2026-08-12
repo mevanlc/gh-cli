@@ -3,16 +3,81 @@ package repos
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/cli/cli/v2/internal/browser"
+	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/pkg/cmdutil"
+	"github.com/cli/cli/v2/pkg/httpmock"
 	"github.com/cli/cli/v2/pkg/iostreams"
 	"github.com/cli/cli/v2/pkg/search"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestNewCmdMyRepos(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantOwners []string
+	}{
+		{
+			name:       "owner qualifier makes an empty search valid",
+			wantOwners: []string{"monalisa"},
+		},
+		{
+			name:       "preserves query and additional owner",
+			args:       []string{"cli", "--match=name", "--owner=cli"},
+			wantOwners: []string{"cli", "monalisa"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := &httpmock.Registry{}
+			defer reg.Verify(t)
+			reg.Register(
+				httpmock.GraphQL(`query UserCurrent\b`),
+				httpmock.StringResponse(`{"data":{"viewer":{"login":"monalisa"}}}`),
+			)
+
+			ios, _, _, _ := iostreams.Test()
+			f := &cmdutil.Factory{
+				IOStreams: ios,
+				Config: func() (gh.Config, error) {
+					return config.NewMockConfig(), nil
+				},
+				HttpClient: func() (*http.Client, error) {
+					return &http.Client{Transport: reg}, nil
+				},
+			}
+
+			var gotOpts *ReposOptions
+			cmd := NewCmdMyRepos(f, func(opts *ReposOptions) error {
+				gotOpts = opts
+				return nil
+			})
+			cmd.SetArgs(tt.args)
+			cmd.SetIn(&bytes.Buffer{})
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+
+			_, err := cmd.ExecuteC()
+			require.NoError(t, err)
+			require.NotNil(t, gotOpts)
+			assert.Equal(t, tt.wantOwners, gotOpts.Query.Qualifiers.User)
+			assert.Equal(t, "my-repos [<query>]", cmd.Use)
+			if len(tt.args) > 0 {
+				assert.Equal(t, []string{"cli"}, gotOpts.Query.Keywords)
+				assert.Equal(t, []string{"name"}, gotOpts.Query.Qualifiers.In)
+			}
+		})
+	}
+}
 
 func TestNewCmdRepos(t *testing.T) {
 	var trueBool = true
