@@ -2,13 +2,14 @@ package browse
 
 import (
 	"encoding/base64"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/cli/cli/v2/internal/config"
 	fd "github.com/cli/cli/v2/internal/featuredetection"
@@ -20,9 +21,10 @@ import (
 	"github.com/cli/cli/v2/pkg/search"
 	"github.com/rivo/tview"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func Test_getSelectedReadme(t *testing.T) {
+func Test_getReadme(t *testing.T) {
 	reg := httpmock.Registry{}
 	defer reg.Verify(t)
 
@@ -34,35 +36,120 @@ func Test_getSelectedReadme(t *testing.T) {
 
 	client := &http.Client{Transport: &reg}
 
-	rg := newReadmeGetter(client, time.Second)
 	opts := ExtBrowseOpts{
-		Rg: rg,
+		Rg: &readmeGetter{client: client},
 	}
-	readme := tview.NewTextView()
-	ui := uiRegistry{
-		List: tview.NewList(),
-	}
-	extEntries := []extEntry{
-		{
-			Name:        "gh-cool",
-			FullName:    "cli/gh-cool",
-			Installed:   false,
-			Official:    true,
-			description: "it's just cool ok",
-		},
-		{
-			Name:        "gh-screensaver",
-			FullName:    "vilmibm/gh-screensaver",
-			Installed:   true,
-			Official:    false,
-			description: "animations in your terminal",
-		},
-	}
-	el := newExtList(opts, ui, extEntries)
 
-	content, err := getSelectedReadme(opts, readme, el)
-	assert.NoError(t, err)
+	content, err := getReadme(opts, "cli/gh-cool", 80)
+	require.NoError(t, err)
 	assert.Contains(t, content, "lol")
+}
+
+func Test_extList_loadSelectedReadme(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		olderError     bool
+		currentError   bool
+		clearSelection bool
+		revisit        bool
+		olderQueued    bool
+	}{
+		{name: "older success finishes last"},
+		{name: "older error finishes last", olderError: true},
+		{name: "current error is preserved", currentError: true},
+		{name: "filter removes all entries", clearSelection: true},
+		{name: "revisit the original extension", revisit: true},
+		{name: "older result queued before selection changes", olderQueued: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				reg := &httpmock.Registry{}
+				defer reg.Verify(t)
+				releaseOlder := make(chan struct{})
+				reg.Register(httpmock.REST("GET", "repos/cli/gh-first/readme"), func(req *http.Request) (*http.Response, error) {
+					<-releaseOlder
+					if tt.olderError {
+						return nil, errors.New("older request failed")
+					}
+					return httpmock.JSONResponse(view.RepoReadme{
+						Content: base64.StdEncoding.EncodeToString([]byte("older readme")),
+					})(req)
+				})
+				if !tt.clearSelection {
+					reg.Register(httpmock.REST("GET", "repos/cli/gh-second/readme"), func(req *http.Request) (*http.Response, error) {
+						if tt.currentError {
+							return nil, errors.New("current request failed")
+						}
+						return httpmock.JSONResponse(view.RepoReadme{
+							Content: base64.StdEncoding.EncodeToString([]byte("current readme")),
+						})(req)
+					})
+				}
+				if tt.revisit {
+					reg.Register(httpmock.REST("GET", "repos/cli/gh-first/readme"), httpmock.JSONResponse(view.RepoReadme{
+						Content: base64.StdEncoding.EncodeToString([]byte("revisited readme")),
+					}))
+				}
+
+				opts := ExtBrowseOpts{
+					Rg:     &readmeGetter{client: &http.Client{Transport: reg}},
+					Logger: log.New(io.Discard, "", 0),
+				}
+				el := newExtList(opts, uiRegistry{List: tview.NewList()}, []extEntry{
+					{FullName: "cli/gh-first"},
+					{FullName: "cli/gh-second"},
+				})
+				updates := make(chan func(), 1)
+				el.QueueUpdateDraw = func(f func()) *tview.Application {
+					updates <- f
+					return nil
+				}
+				readme := tview.NewTextView()
+				readme.SetRect(0, 0, 80, 20)
+				el.loadSelectedReadme(readme)
+				synctest.Wait()
+				assert.Equal(t, "...fetching readme...", readme.GetText(true))
+				var olderUpdate func()
+				if tt.olderQueued {
+					close(releaseOlder)
+					olderUpdate = <-updates
+				}
+
+				if tt.clearSelection {
+					el.Filter("no matching extension")
+				} else {
+					el.ScrollDown()
+				}
+				el.loadSelectedReadme(readme)
+				if !tt.clearSelection {
+					(<-updates)()
+				}
+				expected := "current readme"
+				if tt.revisit {
+					el.ScrollUp()
+					el.loadSelectedReadme(readme)
+					(<-updates)()
+					expected = "revisited readme"
+				}
+				if tt.currentError || tt.clearSelection {
+					expected = "unable to fetch readme :("
+				}
+				assert.Contains(t, readme.GetText(true), expected)
+				currentText := readme.GetText(true)
+				readme.ScrollTo(3, 0)
+
+				if !tt.olderQueued {
+					close(releaseOlder)
+					olderUpdate = <-updates
+				}
+				olderUpdate()
+				assert.Equal(t, currentText, readme.GetText(true))
+				row, col := readme.GetScrollOffset()
+				assert.Equal(t, 3, row)
+				assert.Zero(t, col)
+			})
+		})
+	}
 }
 
 func Test_getExtensionRepos(t *testing.T) {

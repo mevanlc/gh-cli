@@ -6,11 +6,13 @@ and other workflows to the command line. See the
 
 ## about this fork
 
-This fork carries the upstream CLI with one user-facing addition:
+This fork carries the upstream CLI with these changes:
 
 - multi-column job layouts for `gh run watch`.
+- `gh extension browse` keeps the README pane on the selected extension when
+  rapid navigation causes requests to finish out of order.
 
-Apart from this addition, the fork behaves like the upstream revision on which
+Apart from these changes, the fork behaves like the upstream revision on which
 it is based.
 
 ### multi-column run watching

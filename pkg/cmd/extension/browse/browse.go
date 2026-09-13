@@ -1,7 +1,6 @@
 package browse
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -93,6 +92,7 @@ type extList struct {
 	opts            ExtBrowseOpts
 	QueueUpdateDraw func(func()) *tview.Application
 	WaitGroup       wGroup
+	readmeRequestID uint64
 }
 
 type wGroup interface {
@@ -293,18 +293,47 @@ func (el *extList) Filter(text string) {
 	}
 }
 
-func getSelectedReadme(opts ExtBrowseOpts, readme *tview.TextView, el *extList) (string, error) {
+// loadSelectedReadme must be called on the UI thread so the selection and width
+// are captured before starting background work.
+func (el *extList) loadSelectedReadme(readme *tview.TextView) {
+	el.readmeRequestID++
+	requestID := el.readmeRequestID
 	ee, ix := el.FindSelected()
 	if ix < 0 {
-		return "", errors.New("failed to find selected entry")
+		el.opts.Logger.Println("failed to find selected entry")
+		readme.SetText("unable to fetch readme :(")
+		return
 	}
-	fullName := ee.FullName
+	_, _, wrap, _ := readme.GetInnerRect()
+	readme.SetText("...fetching readme...")
+
+	go func() {
+		rendered, err := getReadme(el.opts, ee.FullName, wrap)
+		el.QueueUpdateDraw(func() {
+			// Requests may finish out of order, including when revisiting an extension.
+			if requestID != el.readmeRequestID {
+				return
+			}
+			if err != nil {
+				el.opts.Logger.Println(err.Error())
+				readme.SetText("unable to fetch readme :(")
+				return
+			}
+
+			readme.SetText("")
+			readme.SetDynamicColors(true)
+			w := tview.ANSIWriter(readme)
+			_, _ = w.Write([]byte(rendered))
+			readme.ScrollToBeginning()
+		})
+	}()
+}
+
+func getReadme(opts ExtBrowseOpts, fullName string, wrap int) (string, error) {
 	rm, err := opts.Rg.Get(fullName)
 	if err != nil {
 		return "", err
 	}
-
-	_, _, wrap, _ := readme.GetInnerRect()
 
 	// using glamour directly because if I don't horrible things happen
 	renderer, err := glamour.NewTermRenderer(
@@ -430,27 +459,12 @@ func ExtBrowse(opts ExtBrowseOpts) error {
 	extList := newExtList(opts, ui, extEntries)
 
 	loadSelectedReadme := func() {
-		rendered, err := getSelectedReadme(opts, readme, extList)
-		if err != nil {
-			opts.Logger.Println(err.Error())
-			readme.SetText("unable to fetch readme :(")
-			return
-		}
-
-		app.QueueUpdateDraw(func() {
-			readme.SetText("")
-			readme.SetDynamicColors(true)
-
-			w := tview.ANSIWriter(readme)
-			_, _ = w.Write([]byte(rendered))
-
-			readme.ScrollToBeginning()
-		})
+		extList.loadSelectedReadme(readme)
 	}
 
 	filter.SetChangedFunc(func(text string) {
 		extList.Filter(text)
-		go loadSelectedReadme()
+		loadSelectedReadme()
 	})
 
 	filter.SetDoneFunc(func(key tcell.Key) {
@@ -460,6 +474,7 @@ func ExtBrowse(opts ExtBrowseOpts) error {
 		case tcell.KeyEscape:
 			filter.SetText("")
 			extList.Reset()
+			loadSelectedReadme()
 			extList.Focus()
 		}
 	})
@@ -521,16 +536,10 @@ func ExtBrowse(opts ExtBrowseOpts) error {
 
 	app.SetRoot(pages, true)
 
-	// Force fetching of initial readme by loading it just prior to the first
-	// draw. The callback is removed immediately after draw.
-	app.SetBeforeDrawFunc(func(_ tcell.Screen) bool {
-		go loadSelectedReadme()
-		return false // returning true would halt drawing which we do not want
-	})
-
+	// Fetch the initial readme after layout has established the pane's width.
 	app.SetAfterDrawFunc(func(_ tcell.Screen) {
-		app.SetBeforeDrawFunc(nil)
 		app.SetAfterDrawFunc(nil)
+		loadSelectedReadme()
 	})
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -577,12 +586,10 @@ func ExtBrowse(opts ExtBrowseOpts) error {
 			app.Stop()
 		case 'k':
 			extList.ScrollUp()
-			readme.SetText("...fetching readme...")
-			go loadSelectedReadme()
+			loadSelectedReadme()
 		case 'j':
 			extList.ScrollDown()
-			readme.SetText("...fetching readme...")
-			go loadSelectedReadme()
+			loadSelectedReadme()
 		case 'w':
 			ee, ix := extList.FindSelected()
 			if ix < 0 {
@@ -604,7 +611,7 @@ func ExtBrowse(opts ExtBrowseOpts) error {
 			} else {
 				extList.PageDown()
 			}
-			go loadSelectedReadme()
+			loadSelectedReadme()
 		case '/':
 			app.SetFocus(filter)
 			return nil
@@ -612,25 +619,26 @@ func ExtBrowse(opts ExtBrowseOpts) error {
 		switch event.Key() {
 		case tcell.KeyUp:
 			extList.ScrollUp()
-			go loadSelectedReadme()
+			loadSelectedReadme()
 			return nil
 		case tcell.KeyDown:
 			extList.ScrollDown()
-			go loadSelectedReadme()
+			loadSelectedReadme()
 			return nil
 		case tcell.KeyEscape:
 			filter.SetText("")
 			extList.Reset()
+			loadSelectedReadme()
 		case tcell.KeyCtrlSpace:
 			// The ctrl check works on linux/mac and not windows:
 			extList.PageUp()
-			go loadSelectedReadme()
+			loadSelectedReadme()
 		case tcell.KeyCtrlJ:
 			extList.PageDown()
-			go loadSelectedReadme()
+			loadSelectedReadme()
 		case tcell.KeyCtrlK:
 			extList.PageUp()
-			go loadSelectedReadme()
+			loadSelectedReadme()
 		}
 
 		return event
