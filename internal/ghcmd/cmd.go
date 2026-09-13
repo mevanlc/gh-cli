@@ -21,7 +21,6 @@ import (
 	"github.com/cli/cli/v2/internal/build"
 	"github.com/cli/cli/v2/internal/ci"
 	"github.com/cli/cli/v2/internal/config"
-	"github.com/cli/cli/v2/internal/config/migration"
 	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/gh/ghtelemetry"
 	"github.com/cli/cli/v2/internal/telemetry"
@@ -53,6 +52,7 @@ func Main() exitCode {
 	buildDate := build.Date
 	buildVersion := build.Version
 	hasDebug, _ := utils.IsDebugEnabled()
+	invokingAgent := agents.Detect()
 
 	cfg, cfgErr := config.NewConfig()
 	if cfgErr != nil {
@@ -62,7 +62,7 @@ func Main() exitCode {
 
 	var ioStreams *iostreams.IOStreams
 	if cfgErr == nil {
-		ioStreams = newIOStreams(cfg)
+		ioStreams = newIOStreams(cfg, invokingAgent)
 	} else {
 		ioStreams = iostreams.System()
 	}
@@ -73,7 +73,7 @@ func Main() exitCode {
 	additionalCommonDimensions := ghtelemetry.Dimensions{
 		"version":             strings.TrimPrefix(buildVersion, "v"),
 		"is_tty":              strconv.FormatBool(ioStreams.IsStdoutTTY()),
-		"agent":               string(agents.Detect()),
+		"agent":               string(invokingAgent),
 		"ci":                  strconv.FormatBool(ci.IsCI()),
 		"github_actions":      strconv.FormatBool(ci.IsGitHubActions()),
 		"accessible_colors":   strconv.FormatBool(ioStreams.AccessibleColorsEnabled()),
@@ -127,17 +127,10 @@ func Main() exitCode {
 			return exitError
 		}
 	}
-	defer telemetryService.Flush()
+	// Complete and send events even when returning before Cobra reaches RunE.
+	defer telemetryService.Finish()
 
-	cmdFactory := factory.New(buildVersion, string(agents.Detect()), cfgFunc, ioStreams, ghExecutablePath, telemetryService)
-
-	if cfgErr == nil {
-		var m migration.MultiAccount
-		if err := cfg.Migrate(m); err != nil {
-			fmt.Fprintln(stderr, err)
-			return exitError
-		}
-	}
+	cmdFactory := factory.New(buildVersion, string(invokingAgent), cfgFunc, ioStreams, ghExecutablePath, telemetryService)
 
 	ctx := context.Background()
 	updateCtx, updateCancel := context.WithCancel(ctx)
@@ -222,7 +215,7 @@ func Main() exitCode {
 			return exitCode(extError.ExitCode())
 		}
 
-		printError(stderr, err, cmd, hasDebug)
+		printError(stderr, ioStreams.ColorScheme(), err, cmd, hasDebug, invokingAgent != "")
 
 		if strings.Contains(err.Error(), "Incorrect function") {
 			fmt.Fprintln(stderr, "You appear to be running in MinTTY without pseudo terminal support.")
@@ -278,7 +271,12 @@ func isExtensionCommand(rootCmd *cobra.Command, args []string) bool {
 	return err == nil && c != nil && c.GroupID == "extension"
 }
 
-func printError(out io.Writer, err error, cmd *cobra.Command, debug bool) {
+// printError writes err to out, followed by usage information when the error
+// is the result of command misuse. When fullHelp is set the complete help text
+// is written instead of the terse usage string, giving AI agents the examples,
+// JSON fields and environment variables they need to correct themselves without
+// a second round trip.
+func printError(out io.Writer, cs *iostreams.ColorScheme, err error, cmd *cobra.Command, debug, fullHelp bool) {
 	var dnsError *net.DNSError
 	if errors.As(err, &dnsError) {
 		fmt.Fprintf(out, "error connecting to %s\n", dnsError.Name)
@@ -295,6 +293,13 @@ func printError(out io.Writer, err error, cmd *cobra.Command, debug bool) {
 	if errors.As(err, &flagError) || strings.HasPrefix(err.Error(), "unknown command ") {
 		if !strings.HasSuffix(err.Error(), "\n") {
 			fmt.Fprintln(out)
+		}
+		if fullHelp {
+			// Render into out rather than calling cmd.Help(), which would send
+			// the help text to stdout and split a single failure across two
+			// streams.
+			root.WriteHelp(out, cs, cmd)
+			return
 		}
 		fmt.Fprintln(out, cmd.UsageString())
 	}
@@ -346,7 +351,7 @@ func isUnderHomebrew(ghBinary string) bool {
 	return strings.HasPrefix(ghBinary, brewBinPrefix)
 }
 
-func newIOStreams(cfg gh.Config) *iostreams.IOStreams {
+func newIOStreams(cfg gh.Config, invokingAgent agents.AgentName) *iostreams.IOStreams {
 	io := iostreams.System()
 
 	if _, ghPromptDisabled := os.LookupEnv("GH_PROMPT_DISABLED"); ghPromptDisabled {
@@ -378,7 +383,9 @@ func newIOStreams(cfg gh.Config) *iostreams.IOStreams {
 		if !slices.Contains(falseyValues, ghSpinnerDisabledValue) {
 			io.SetSpinnerDisabled(true)
 		}
-	} else if spinnerDisabled := cfg.Spinner(""); spinnerDisabled.Value == "disabled" {
+	} else if invokingAgent != "" {
+		io.SetSpinnerDisabled(true)
+	} else if spinner := cfg.Spinner(""); spinner.Value == "disabled" {
 		io.SetSpinnerDisabled(true)
 	}
 

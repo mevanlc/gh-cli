@@ -26,6 +26,7 @@ import (
 )
 
 type errWithExitCode interface {
+	error
 	ExitCode() int
 }
 
@@ -929,6 +930,9 @@ func interactiveRepoNameAndOwner(client *http.Client, hostname string, prompter 
 	name, err := prompter.Input("Repository name", defaultName)
 	if err != nil {
 		return "", "", err
+	}
+	if strings.TrimSpace(name) == "" {
+		return "", "", errors.New("repository name cannot be blank")
 	}
 
 	name, owner, err := splitNameAndOwner(name)
